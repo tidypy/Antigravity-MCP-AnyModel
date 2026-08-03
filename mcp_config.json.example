@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "kimi-k3-fast": {
+      "command": "python",
+      "args": ["C:/Users/Dev/.gemini/config/MCP-SOL.py"],
+      "env": {
+        "FIREWORKS_API_KEY": "YOUR_FIREWORKS_API_KEY_HERE"
+      }
+    }
+  }
+}

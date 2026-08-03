@@ -1,2 +1,295 @@
-# Antigravity-MCP-AnyModel
-Utilize ANY LLM via BYOK with Python MCP
+# Antigravity MCP AnyModel Integration
+
+[![Repository](https://img.shields.io/badge/GitHub-tidypy%2FAntigravity--MCP--AnyModel-blue?style=flat-square&logo=github)](https://github.com/tidypy/Antigravity-MCP-AnyModel.git)
+[![Protocol](https://img.shields.io/badge/Protocol-MCP%20JSON--RPC%202.0-orange?style=flat-square)](https://modelcontextprotocol.io/)
+[![Orchestrator](https://img.shields.io/badge/Orchestrator-Google%20Antigravity-4285F4?style=flat-square)](https://deepmind.google/)
+
+An Model Context Protocol (MCP) bridge enabling **Google Antigravity** to seamlessly delegate code generation, heavy reasoning, and specialized tasks to third-party LLMs (such as **Kimi K3 Fast** hosted on Fireworks AI or other serverless BYOK providers).
+
+---
+
+## 🛠️ Quick Setup & Installation
+
+### Step 1: Locate your MCP Customizations Folder
+In Google Antigravity:
+1. Go to **Settings** $\rightarrow$ **Customizations** $\rightarrow$ Click **Open MCP Folder**.
+2. Alternatively, open your local configuration directory directly:
+   `C:\Users\Dev\.gemini\config\`
+
+### Step 2: Add the Python MCP Server Script
+Paste the Python script into your configuration folder (e.g., `C:\Users\Dev\.gemini\config\MCP-SOL.py` or `mcp_kimi_k3.py`).
+
+<details>
+<summary>📄 Click to view complete MCP Server Script (MCP-SOL.py)</summary>
+
+```python
+import sys
+import json
+import os
+import urllib.request
+import urllib.error
+
+# Environment Variable support (fallback to default string if not set)
+API_KEY = os.environ.get("FIREWORKS_API_KEY", "YOUR_FIREWORKS_API_KEY")
+API_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
+MODEL_NAME = "accounts/fireworks/routers/kimi-k3-fast"
+
+def query_kimi(prompt):
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": MODEL_NAME,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+    
+    req = urllib.request.Request(
+        API_URL, 
+        data=json.dumps(data).encode('utf-8'), 
+        headers=headers, 
+        method="POST"
+    )
+    
+    try:
+        # 180 seconds (3 minutes) socket timeout
+        with urllib.request.urlopen(req, timeout=180) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            
+            if "choices" in res_data and len(res_data["choices"]) > 0:
+                return res_data["choices"][0]["message"]["content"], False
+            elif "error" in res_data:
+                return f"API Error: {res_data['error']}", True
+            else:
+                return f"Unexpected response format: {json.dumps(res_data)}", True
+
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = e.read().decode('utf-8')
+            return f"HTTP Error {e.code}: {err_body}", True
+        except Exception:
+            return f"HTTP Error {e.code}: {e.reason}", True
+    except urllib.error.URLError as e:
+        return f"Network Error: {e.reason}", True
+    except Exception as e:
+        return f"Unexpected error: {str(e)}", True
+
+def respond(response_id, result=None, error=None):
+    if response_id is None:
+        return
+        
+    response = {
+        "jsonrpc": "2.0",
+        "id": response_id
+    }
+    if error is not None:
+        response["error"] = error
+    else:
+        response["result"] = result
+        
+    sys.stdout.write(json.dumps(response) + "\n")
+    sys.stdout.flush()
+
+def main():
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            break
+            
+        line = line.strip()
+        if not line:
+            continue
+            
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as e:
+            sys.stderr.write(f"JSON Parse Error: {e}\n")
+            sys.stderr.flush()
+            continue
+        
+        req_id = req.get("id")
+        method = req.get("method")
+        
+        if method == "initialize":
+            respond(req_id, {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "serverInfo": {
+                    "name": "kimi-k3-fast-mcp-server",
+                    "version": "1.0.0"
+                }
+            })
+        elif method and method.startswith("notifications/"):
+            pass
+        elif method == "tools/list":
+            respond(req_id, {
+                "tools": [
+                    {
+                        "name": "query_kimi",
+                        "description": "Send a prompt to the Kimi K3 Fast model on Fireworks AI for code generation and reasoning.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "The detailed instructions or code query."
+                                }
+                            },
+                            "required": ["prompt"]
+                        }
+                    }
+                ]
+            })
+        elif method == "tools/call":
+            params = req.get("params", {})
+            name = params.get("name")
+            arguments = params.get("arguments", {})
+            
+            if name == "query_kimi":
+                prompt = arguments.get("prompt", "")
+                result_text, is_error = query_kimi(prompt)
+                
+                payload = {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": result_text
+                        }
+                    ]
+                }
+                if is_error:
+                    payload["isError"] = True
+                    
+                respond(req_id, payload)
+            else:
+                respond(req_id, error={"code": -32601, "message": f"Method '{name}' not found"})
+        else:
+            if req_id is not None:
+                respond(req_id, error={"code": -32601, "message": f"Unhandled method: {method}"})
+
+if __name__ == "__main__":
+    main()
+```
+</details>
+
+### Step 3: Configure `mcp_config.json`
+Add your server configuration to `C:\Users\Dev\.gemini\config\mcp_config.json` (or ask Antigravity to perform the setup for you):
+
+```json
+{
+  "mcpServers": {
+    "kimi-k3-fast": {
+      "command": "python",
+      "args": ["C:/Users/Dev/.gemini/config/MCP-SOL.py"],
+      "env": {
+        "FIREWORKS_API_KEY": "YOUR_FIREWORKS_API_KEY_HERE"
+      }
+    }
+  }
+}
+```
+
+---
+
+## 💬 How to Use (Chat Invocation)
+
+Simply invoke the API in your Antigravity chat prompt:
+
+> **User Prompt:**  
+> *"Please invoke Kimi K3 to complete phase 1 of the implementation."*
+
+Antigravity will automatically call the registered MCP tool (`call_mcp_tool` targeting `kimi-k3-fast` / `query_kimi`), receive the model's raw generated code, extract the payload, and integrate it into your codebase.
+
+---
+
+## 🧠 How It Works (Antigravity as Orchestrator)
+
+Under the hood, Antigravity functions as an intelligent orchestrator managing tool dispatches, file writes, testing, and error recovery.
+
+### Real-World Orchestration Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant AG as Antigravity Orchestrator
+    participant MCP as MCP Server (Kimi K3 Fast)
+    participant FS as Local Filesystem / Git
+
+    User->>AG: "Invoke Kimi K3 for phase 1 implementation"
+    
+    rect rgb(240, 248, 255)
+    note right of AG: Scenario 1: Successful Delegation (db_migration.py)
+    AG->>MCP: call_mcp_tool("query_kimi", prompt)
+    MCP-->>AG: Returns 324 lines of Python payload
+    AG->>FS: Saves output to bin/Code/Databases/db_migration.py ✅
+    end
+
+    rect rgb(255, 240, 240)
+    note right of AG: Scenario 2: Network Timeout & Fallback (game_validator.py)
+    AG->>MCP: call_mcp_tool("query_kimi", prompt)
+    MCP--xAG: Read timeout after 60s ("The read operation timed out")
+    alt Fallback Mode Active / Explicit "Gemini step in"
+        AG->>FS: Gemini steps in to generate game_validator.py ⚙️
+        AG->>FS: Writes test suite & executes unit tests (8/8 passed)
+        AG->>FS: Commits and pushes changes to GitHub
+    else Strict Delegation Mode Enforced
+        AG->>User: Halts execution, reports exact error, asks for retry confirmation
+    end
+    end
+```
+
+### Breakdown of Execution:
+
+1. **`db_migration.py` — Kimi K3 Fast Generation ✅**
+   * Antigravity dispatches `call_mcp_tool` targeting `kimi-k3-fast` (`query_kimi`).
+   * Kimi K3 Fast on Fireworks AI processes the prompt and returns 324 lines of clean Python code.
+   * Raw payload is recorded in step logs (`.system_generated/steps/.../output.txt`).
+   * Antigravity parses the payload, extracts code blocks, and writes `bin/Code/Databases/db_migration.py`.
+
+2. **`game_validator.py` — MCP Timeout & Orchestrator Fallback ⚙️**
+   * Antigravity dispatches queries to Kimi K3 Fast for `game_validator.py`.
+   * Fireworks AI times out after 60 seconds (`Unexpected error: The read operation timed out`).
+   * **Orchestrator Resolution**: Rather than stalling execution, Antigravity steps in directly to write `game_validator.py` using Phase 2 tiering rules and schema definitions.
+   * Antigravity authors `test_phase2_validation.py`, runs the test suite (8/8 unit tests passed in 0.109s), commits, and pushes code to GitHub.
+
+---
+
+## ⚡ Timeout Troubleshooting & Solutions
+
+### Diagnosis: 60-Second Read Timeout on Long Streams
+When requesting complete, multi-hundred line code modules (~1,200+ tokens / 250+ lines), serverless multi-LLM providers (e.g., Fireworks AI) or underlying HTTP clients may hit a **hardcoded 60-second read timeout** before the response finish streaming back. Warm-up calls ("Hi") complete in under 3 seconds because they only return ~30 tokens.
+
+### Solutions:
+
+#### Option A: Chunked Generation (Recommended for External LLM)
+Ask the LLM to write small, tightly-scoped functions:
+> *"Please invoke Kimi K3 to write only the `validate_game_data()` function."*  
+This ensures each individual stream completes in under 15 seconds.
+
+#### Option B: Fallback to Gemini ("Gemini step in")
+If external model APIs stall or time out, instruct Gemini to take over:
+> *"Gemini step in"*  
+Antigravity will authorize Gemini to complete the code generation, test suite creation, and git synchronization seamlessly.
+
+---
+
+## 🛡️ Operational Rules Enforced
+
+To ensure full transparency and predictable behavior, Antigravity enforces strict delegation rules:
+
+1. **Strict Kimi K3 Delegation (No Automatic Unsanctioned Fallbacks):**
+   Antigravity will **NEVER** silently generate code or override Kimi K3 unless explicitly configured or instructed to do so.
+2. **Timeout / Error Reporting & Retry:**
+   If `query_kimi` times out or fails (due to Fireworks AI latency or network issues), Antigravity will immediately halt, explain the exact error details, and prompt you for instructions or retry approval.
+3. **Gemini Step-In Requires Explicit Approval + High Model:**
+   Gemini will write code only when you explicitly state **"Gemini step in"**. When authorized, code generation is handled using the **Gemini 3.1 Pro (High)** model (never lower tier or flash models).
+
+---
+
+## 📄 License
+MIT License. Created for use with Google Antigravity & Model Context Protocol.
