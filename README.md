@@ -262,7 +262,8 @@ sequenceDiagram
 ## ⚡ Timeout Troubleshooting & Solutions
 
 ### Diagnosis: 60-Second Read Timeout on Long Streams
-Reasons: 
+
+#Reasons: 
    
 *--Restricted multi-hundred line code modules (~1,200+ tokens / 250+ lines)
 >   
