@@ -262,7 +262,10 @@ sequenceDiagram
 ## ⚡ Timeout Troubleshooting & Solutions
 
 ### Diagnosis: 60-Second Read Timeout on Long Streams
-Restricted multi-hundred line code modules (~1,200+ tokens / 250+ lines), Some serverless multi-LLM provider restrictions (e.g., Fireworks AI) or underlying HTTP clients may hit a **hardcoded 60-second read timeout** before the response finish streaming back. Warm-up calls needed ("Hi") should complete in under 3 seconds because they only return ~30 tokens.
+Reasons: 
+--Restricted multi-hundred line code modules (~1,200+ tokens / 250+ lines), 
+--Some serverless multi-LLM provider restrictions (e.g., Fireworks AI) or underlying HTTP clients may hit a **hardcoded 60-second read timeout** before the response finish streaming back. 
+--Warm-up calls needed ("Hi") should complete in under 3 seconds because they only return ~30 tokens.
 
 ### Solutions:
 
