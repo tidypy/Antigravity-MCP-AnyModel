@@ -14,10 +14,10 @@ An Model Context Protocol (MCP) bridge enabling **Google Antigravity** to seamle
 In Google Antigravity:
 1. Go to **Settings** $\rightarrow$ **Customizations** $\rightarrow$ Click **Open MCP Folder**.
 2. Alternatively, open your local configuration directory directly:
-   `C:\Users\Dev\.gemini\config\`
+   `C:\Users\YOURUSERNAME\.gemini\config\`
 
 ### Step 2: Add the Python MCP Server Script
-Paste the Python script into your configuration folder (e.g., `C:\Users\Dev\.gemini\config\MCP-SOL.py` or `mcp_kimi_k3.py`).
+Paste the Python script into your configuration folder (e.g., `C:\Users\YOURUSERNAME\.gemini\config\MCP-SOL.py` or `mcp_kimi_k3.py whatever you need`).
 
 <details>
 <summary>📄 Click to view complete MCP Server Script (MCP-SOL.py)</summary>
@@ -262,7 +262,7 @@ sequenceDiagram
 ## ⚡ Timeout Troubleshooting & Solutions
 
 ### Diagnosis: 60-Second Read Timeout on Long Streams
-When requesting complete, multi-hundred line code modules (~1,200+ tokens / 250+ lines), serverless multi-LLM providers (e.g., Fireworks AI) or underlying HTTP clients may hit a **hardcoded 60-second read timeout** before the response finish streaming back. Warm-up calls ("Hi") complete in under 3 seconds because they only return ~30 tokens.
+Restricted multi-hundred line code modules (~1,200+ tokens / 250+ lines), Some serverless multi-LLM provider restrictions (e.g., Fireworks AI) or underlying HTTP clients may hit a **hardcoded 60-second read timeout** before the response finish streaming back. Warm-up calls needed ("Hi") should complete in under 3 seconds because they only return ~30 tokens.
 
 ### Solutions:
 
@@ -275,6 +275,8 @@ This ensures each individual stream completes in under 15 seconds.
 If external model APIs stall or time out, instruct Gemini to take over:
 > *"Gemini step in"*  
 Antigravity will authorize Gemini to complete the code generation, test suite creation, and git synchronization seamlessly.
+
+#### Have Antigravity Increase the timeout in the Python Script (currently 3-minutes)
 
 ---
 
