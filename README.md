@@ -536,22 +536,17 @@ To ensure full transparency and predictable behavior, Antigravity enforces stric
 
 ---
 
- Supported Soft Error Reason Codes
-Soft Error Code (reason_code)	Trigger Condition	Diagnostic Explanation & Action Recommendation
-MISSING_API_KEY	FIREWORKS_API_KEY is empty or set to placeholder.	Explanation: API key is not configured.
-Action: Configure FIREWORKS_API_KEY in mcp_config.json.
-TIMEOUT_EXCEEDED	LLM response exceeded timeout (default 25s).	Explanation: Network read timed out on long stream.
-Action: Use chunked generation or prompt "Gemini step in".
-NETWORK_UNREACHABLE	Connection dropped or internet unavailable.	Explanation: DNS or socket error.
-Action: Check local network connection.
-HTTP_401	Invalid Fireworks API key credentials.	Explanation: Unauthorized request.
-Action: Verify your Fireworks AI API key.
-HTTP_429	Rate limit or token quota exceeded.	Explanation: Too many concurrent requests.
-Action: Retry query with backoff or use TOON format.
-HTTP_500 / HTTP_503	Fireworks AI upstream server issue.	Explanation: Provider service disruption.
-Action: Check Fireworks AI status or use Gemini fallback.
-KEY_COLLISION (TOON)	Alias maps to an existing object key.	Explanation: Non-bijective key_map alias collision.
-Action: Provide unique alias mappings in key_map.
+# Supported Soft Error Reason Codes
+
+| Soft Error Code (`reason_code`) | Trigger Condition | Diagnostic Explanation & Action Recommendation |
+|---|---|---|
+| `MISSING_API_KEY` | `FIREWORKS_API_KEY` is empty or set to placeholder. | **Explanation:** API key is not configured.<br>**Action:** Configure `FIREWORKS_API_KEY` in `mcp_config.json`. |
+| `TIMEOUT_EXCEEDED` | LLM response exceeded timeout (default 25s). | **Explanation:** Network read timed out on long stream.<br>**Action:** Use chunked generation or prompt "Gemini step in". |
+| `NETWORK_UNREACHABLE` | Connection dropped or internet unavailable. | **Explanation:** DNS or socket error.<br>**Action:** Check local network connection. |
+| `HTTP_401` | Invalid Fireworks API key credentials. | **Explanation:** Unauthorized request.<br>**Action:** Verify your Fireworks AI API key. |
+| `HTTP_429` | Rate limit or token quota exceeded. | **Explanation:** Too many concurrent requests.<br>**Action:** Retry query with backoff or use TOON format. |
+| `HTTP_500` / `HTTP_503` | Fireworks AI upstream server issue. | **Explanation:** Provider service disruption.<br>**Action:** Check Fireworks AI status or use Gemini fallback. |
+| `KEY_COLLISION` (TOON) | Alias maps to an existing object key. | **Explanation:** Non-bijective `key_map` alias collision.<br>**Action:** Provide unique alias mappings in `key_map`. |
 
 
 ## 📄 License
