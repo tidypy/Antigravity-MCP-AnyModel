@@ -2,36 +2,215 @@ import sys
 import json
 import os
 import re
-import socket
 import urllib.request
 import urllib.error
-from datetime import datetime
 
-# Environment Variable support (fallback to default string if not set in environment)
-API_KEY = os.environ.get("FIREWORKS_API_KEY", "YOUR_FIREWORKS_API_KEY")
+# Reconfigure stdout/stdin to UTF-8 on Windows for safe stdio transport
+if hasattr(sys.stdin, "reconfigure"):
+    sys.stdin.reconfigure(encoding="utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 API_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
-MODEL_NAME = "accounts/fireworks/routers/kimi-k3-fast"
+DEFAULT_MODEL = "accounts/fireworks/routers/kimi-k3-fast"
+DEFAULT_TIMEOUT_SEC = 25
 
-# Default timeout in seconds (configurable via FIREWORKS_TIMEOUT env var, default 25s)
-DEFAULT_TIMEOUT = int(os.environ.get("FIREWORKS_TIMEOUT", "25"))
+# ==========================================
+# TOON (Token-Oriented Object Notation) Engine
+# ==========================================
 
-def log_stderr(message):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sys.stderr.write(f"[{timestamp}] [MCP-SOL] {message}\n")
-    sys.stderr.flush()
+_PRIMITIVE_LIKE = re.compile(r'-?\d+(\.\d+)?([eE][+-]?\d+)?|true|false|null')
+_SPECIALS = set('",:\n\t\r[]{}')
 
-def query_kimi(prompt, timeout_seconds=None):
-    timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_TIMEOUT
-    log_stderr(f"Initiating request to Fireworks AI (Model: {MODEL_NAME}, Timeout: {timeout}s)")
+def _encode_str(s):
+    """Encodes a string into TOON, adding quotes if it contains specials, whitespace, or primitive keywords."""
+    if not s:
+        return '""'
+    if s != s.strip() or _PRIMITIVE_LIKE.fullmatch(s) or any(c in _SPECIALS for c in s):
+        esc = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t').replace('\r', '\\r')
+        return f'"{esc}"'
+    return s
+
+def toon_encode(obj, indent=0):
+    """
+    Encodes Python dictionary/list/primitive into TOON format.
+    Minimizes token usage using YAML-style indentation and CSV-style tabular headers for arrays.
+    """
+    prefix = "  " * indent
+    if obj is None:
+        return "null"
+    elif isinstance(obj, bool):
+        return "true" if obj else "false"
+    elif isinstance(obj, (int, float)):
+        return str(obj)
+    elif isinstance(obj, str):
+        return _encode_str(obj)
+    elif isinstance(obj, dict):
+        if not obj:
+            return ""
+        lines = []
+        for k, v in obj.items():
+            encoded_key = _encode_str(k) if any(c in k for c in _SPECIALS) else k
+            if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+                cols = list(v[0].keys())
+                if all(list(x.keys()) == cols for x in v):
+                    col_str = ",".join(cols)
+                    lines.append(f"{prefix}{encoded_key}[{len(v)}]{{{col_str}}}:")
+                    for row in v:
+                        row_vals = [toon_encode(row.get(c)) for c in cols]
+                        lines.append(f"{prefix}  " + ",".join(row_vals))
+                else:
+                    lines.append(f"{prefix}{encoded_key}:")
+                    for item in v:
+                        lines.append(f"{prefix}  -")
+                        lines.append(toon_encode(item, indent + 2))
+            elif isinstance(v, list) and v and all(not isinstance(x, (dict, list)) for x in v):
+                lines.append(f"{prefix}{encoded_key}[{len(v)}]: " + ",".join(toon_encode(x) for x in v))
+            elif isinstance(v, dict):
+                lines.append(f"{prefix}{encoded_key}:")
+                sub = toon_encode(v, indent + 1)
+                if sub:
+                    lines.append(sub)
+            elif isinstance(v, list):
+                lines.append(f"{prefix}{encoded_key}:")
+                for x in v:
+                    lines.append(f"{prefix}  - " + toon_encode(x))
+            else:
+                lines.append(f"{prefix}{encoded_key}: {toon_encode(v)}")
+        return "\n".join(lines)
+    elif isinstance(obj, list):
+        if not obj:
+            return "[]"
+        if all(isinstance(x, dict) for x in obj):
+            cols = list(obj[0].keys())
+            lines = [f"items[{len(obj)}]{{{','.join(cols)}}}:"]
+            for row in obj:
+                lines.append("  " + ",".join(toon_encode(row.get(c)) for c in cols))
+            return "\n".join(lines)
+        return ",".join(toon_encode(x) for x in obj)
+    return _encode_str(str(obj))
+
+def encode_toon(json_data, indent=0, **kwargs):
+    """Wrapper that accepts JSON string or dict and returns TOON string."""
+    if isinstance(json_data, str):
+        obj = json.loads(json_data)
+    else:
+        obj = json_data
+    return toon_encode(obj, indent=indent)
+
+def _parse_val(val_str):
+    """Parses a scalar TOON value string into a Python object."""
+    val = val_str.strip()
+    if val == "null" or val == "":
+        return None
+    if val.lower() == "true":
+        return True
+    if val.lower() == "false":
+        return False
+    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+        inner = val[1:-1]
+        return inner.replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n').replace('\\t', '\t').replace('\\r', '\r')
+    try:
+        if "." in val or "e" in val.lower():
+            return float(val)
+        return int(val)
+    except ValueError:
+        return val
+
+def toon_decode(toon_str):
+    """Decodes a TOON formatted string back into standard Python dictionary/list structures."""
+    lines = [l for l in toon_str.splitlines() if l.strip()]
+    if not lines:
+        return {}
     
+    root = {}
+    stack = [(0, root)]
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        indent = len(line) - len(line.lstrip(" "))
+        content = line.strip()
+        
+        while stack and stack[-1][0] > indent and len(stack) > 1:
+            stack.pop()
+            
+        current_obj = stack[-1][1]
+        
+        tab_match = re.match(r"^([\w_]+)\[(\d+)\]\{([^}]+)\}:$", content)
+        prim_arr_match = re.match(r"^([\w_]+)\[(\d+)\]:\s*(.*)$", content)
+        kv_match = re.match(r"^([\w_]+):\s*(.*)$", content)
+        
+        if tab_match:
+            key, count, cols_str = tab_match.groups()
+            count = int(count)
+            cols = [c.strip() for c in cols_str.split(",")]
+            arr = []
+            for _ in range(count):
+                i += 1
+                if i < len(lines):
+                    row_line = lines[i].strip()
+                    parts = [p.strip() for p in row_line.split(",")]
+                    row_dict = {}
+                    for c_idx, col in enumerate(cols):
+                        row_dict[col] = _parse_val(parts[c_idx]) if c_idx < len(parts) else None
+                    arr.append(row_dict)
+            if isinstance(current_obj, dict):
+                current_obj[key] = arr
+        elif prim_arr_match:
+            key, count, inline_vals = prim_arr_match.groups()
+            vals = [_parse_val(v) for v in inline_vals.split(",")] if inline_vals else []
+            if isinstance(current_obj, dict):
+                current_obj[key] = vals
+        elif kv_match:
+            key, val_part = kv_match.groups()
+            if not val_part:
+                sub_dict = {}
+                if isinstance(current_obj, dict):
+                    current_obj[key] = sub_dict
+                stack.append((indent + 2, sub_dict))
+            else:
+                if isinstance(current_obj, dict):
+                    current_obj[key] = _parse_val(val_part)
+        i += 1
+        
+    return root
+
+def decode_toon(toon_str, **kwargs):
+    """Wrapper that decodes TOON string and returns JSON string."""
+    decoded = toon_decode(toon_str)
+    return json.dumps(decoded, indent=2)
+
+# ==========================================
+# Fireworks AI LLM Service & MCP Logic
+# ==========================================
+
+def query_kimi(prompt, use_toon=False, timeout_seconds=None):
+    api_key = os.environ.get("FIREWORKS_API_KEY", "")
+    if not api_key or api_key == "YOUR_FIREWORKS_API_KEY":
+        diag = {
+            "status": "ERROR",
+            "reason_code": "MISSING_API_KEY",
+            "message": "FIREWORKS_API_KEY environment variable is not configured.",
+            "action_recommendation": "Configure FIREWORKS_API_KEY in mcp_config.json or system environment."
+        }
+        return json.dumps(diag), True
+
+    timeout = float(timeout_seconds) if timeout_seconds is not None else DEFAULT_TIMEOUT_SEC
+
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+    
+    final_prompt = prompt
+    if use_toon:
+        final_prompt = f"Please output your response using TOON (Token-Oriented Object Notation) compact format.\n\nUser Request:\n{prompt}"
+        
     data = {
-        "model": MODEL_NAME,
+        "model": DEFAULT_MODEL,
         "messages": [
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": final_prompt}
         ]
     }
     
@@ -47,200 +226,62 @@ def query_kimi(prompt, timeout_seconds=None):
             res_data = json.loads(response.read().decode('utf-8'))
             
             if "choices" in res_data and len(res_data["choices"]) > 0:
-                log_stderr("Request completed successfully.")
                 return res_data["choices"][0]["message"]["content"], False
             elif "error" in res_data:
-                err_msg = json.dumps(res_data["error"])
-                log_stderr(f"API Error payload returned: {err_msg}")
-                diag = format_diagnostic_error("FIREWORKS_API_ERROR", f"Fireworks API Error: {err_msg}")
-                return diag, True
+                diag = {
+                    "status": "ERROR",
+                    "reason_code": "API_ERROR",
+                    "message": str(res_data["error"]),
+                    "action_recommendation": "Verify API key and model parameters."
+                }
+                return json.dumps(diag), True
             else:
-                diag = format_diagnostic_error("UNEXPECTED_RESPONSE_FORMAT", f"Unexpected format: {json.dumps(res_data)}")
-                return diag, True
+                diag = {
+                    "status": "ERROR",
+                    "reason_code": "UNEXPECTED_FORMAT",
+                    "message": f"Unexpected response format: {json.dumps(res_data)}",
+                    "action_recommendation": "Retry query."
+                }
+                return json.dumps(diag), True
 
     except urllib.error.HTTPError as e:
-        code = e.code
-        try:
-            err_body = e.read().decode('utf-8')
-        except Exception:
-            err_body = str(e.reason)
-            
-        reason_code = f"HTTP_{code}"
-        if code == 401:
-            reason_code = "UNAUTHORIZED_401"
-        elif code == 429:
-            reason_code = "RATE_LIMITED_429"
-        elif code in (500, 502, 503, 504):
-            reason_code = f"SERVERLESS_OVERLOAD_{code}"
-
-        log_stderr(f"HTTPError {code}: {reason_code} - {err_body}")
-        diag = format_diagnostic_error(reason_code, f"HTTP {code} ({e.reason}): {err_body}")
-        return diag, True
-
+        diag = {
+            "status": "ERROR",
+            "reason_code": f"HTTP_{e.code}",
+            "message": f"HTTP Error {e.code}: {e.reason}",
+            "action_recommendation": "Check Fireworks AI service status."
+        }
+        return json.dumps(diag), True
     except urllib.error.URLError as e:
-        if isinstance(e.reason, socket.timeout) or "timed out" in str(e.reason).lower():
+        reason_str = str(e.reason)
+        if "timed out" in reason_str.lower() or "timeout" in reason_str.lower():
             reason_code = "TIMEOUT_EXCEEDED"
-            msg = f"Fireworks AI serverless API timed out after {timeout}s. Endpoint hung before returning tokens."
+            action = "Request chunked generation or use 'Gemini step in'."
         else:
             reason_code = "NETWORK_UNREACHABLE"
-            msg = f"Network connection failed: {e.reason}"
-            
-        log_stderr(f"URLError: {reason_code} - {msg}")
-        diag = format_diagnostic_error(reason_code, msg, timeout_seconds=timeout)
-        return diag, True
-
-    except TimeoutError:
-        reason_code = "TIMEOUT_EXCEEDED"
-        msg = f"Fireworks AI serverless API timed out after {timeout}s."
-        log_stderr(f"TimeoutError: {reason_code} - {msg}")
-        diag = format_diagnostic_error(reason_code, msg, timeout_seconds=timeout)
-        return diag, True
-
+            action = "Check network connection."
+        diag = {
+            "status": "ERROR",
+            "reason_code": reason_code,
+            "message": f"Network Error: {reason_str}",
+            "action_recommendation": action
+        }
+        return json.dumps(diag), True
     except Exception as e:
-        reason_code = "UNKNOWN_FAILURE"
-        msg = f"Unexpected error: {str(e)}"
-        log_stderr(f"Exception: {reason_code} - {msg}")
-        diag = format_diagnostic_error(reason_code, msg)
-        return diag, True
-
-def format_diagnostic_error(reason_code, details, timeout_seconds=None):
-    error_payload = {
-        "status": "ERROR",
-        "reason_code": reason_code,
-        "details": details,
-        "timestamp": datetime.now().isoformat(),
-        "action_recommendation": "Fireworks serverless call stalled/failed. Switch to Orchestrator (Gemini step-in) or retry with smaller prompt context."
-    }
-    if timeout_seconds:
-        error_payload["configured_timeout_seconds"] = timeout_seconds
-    return json.dumps(error_payload, indent=2)
-
-def encode_toon(json_input, indent=2, delimiter=',', key_folding="off", flatten_depth=float('inf'), replacer=None):
-    if isinstance(json_input, str):
-        data = json.loads(json_input)
-    else:
-        data = json_input
-
-    def fold_keys(obj, current_depth=0):
-        if not isinstance(obj, dict) or current_depth >= flatten_depth:
-            return obj
-        res = {}
-        for k, v in obj.items():
-            v_folded = fold_keys(v, current_depth + 1) if isinstance(v, dict) else v
-            if key_folding == "safe" and isinstance(v_folded, dict) and len(v_folded) == 1:
-                sub_k, sub_v = list(v_folded.items())[0]
-                res[f"{k}.{sub_k}"] = sub_v
-            else:
-                res[k] = v_folded
-        return res
-
-    if key_folding == "safe":
-        data = fold_keys(data)
-
-    def is_tabular_array(arr):
-        return isinstance(arr, list) and len(arr) > 0 and all(isinstance(x, dict) for x in arr)
-
-    def format_tabular(prefix, arr):
-        if not arr:
-            return f"{prefix}[0]{{}}:"
-        all_keys = list(arr[0].keys())
-        if replacer:
-            replacer_set = set(str(r) for r in replacer)
-            all_keys = [k for k in all_keys if str(k) in replacer_set]
-        header = f"{prefix}[{len(arr)}]{{{','.join(all_keys)}}}:"
-        rows = []
-        for item in arr:
-            row = delimiter.join(str(item.get(k, '')) for k in all_keys)
-            rows.append(row)
-        return header + "\n" + "\n".join(rows)
-
-    if is_tabular_array(data):
-        return format_tabular("", data)
-    elif isinstance(data, dict):
-        lines = []
-        for k, v in data.items():
-            if is_tabular_array(v):
-                lines.append(format_tabular(k, v))
-            else:
-                lines.append(f"{k}: {json.dumps(v)}")
-        return "\n".join(lines)
-    
-    return json.dumps(data, indent=indent)
-
-def decode_toon(toon_input, strict=True, expand_paths="off", indent=2):
-    lines = [line.strip() for line in toon_input.strip().splitlines() if line.strip()]
-    if not lines:
-        return json.dumps({}, indent=indent)
-
-    header_pattern = re.compile(r"^([a-zA-Z0-9_\.]*)\[(\d+)\]\{([^\}]*)\}:$")
-
-    result = {}
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        match = header_pattern.match(line)
-        if match:
-            key, count_str, cols_str = match.groups()
-            expected_count = int(count_str)
-            cols = [c.strip() for c in cols_str.split(",") if c.strip()]
-            
-            rows = []
-            i += 1
-            delim = ","
-            if i < len(lines):
-                if "\t" in lines[i]:
-                    delim = "\t"
-                elif "|" in lines[i]:
-                    delim = "|"
-
-            while i < len(lines) and not header_pattern.match(lines[i]) and ":" not in lines[i]:
-                row_values = lines[i].split(delim)
-                obj = {}
-                for idx, col in enumerate(cols):
-                    val_str = row_values[idx].strip() if idx < len(row_values) else ""
-                    if val_str.isdigit():
-                        val = int(val_str)
-                    elif val_str.replace('.', '', 1).isdigit() and val_str.count('.') == 1:
-                        val = float(val_str)
-                    elif val_str.lower() == 'true':
-                        val = True
-                    elif val_str.lower() == 'false':
-                        val = False
-                    elif val_str.lower() == 'null':
-                        val = None
-                    else:
-                        val = val_str
-                    obj[col] = val
-                rows.append(obj)
-                i += 1
-            
-            if strict and len(rows) != expected_count:
-                raise ValueError(f"Strict validation failed: expected {expected_count} rows, got {len(rows)}")
-
-            if key:
-                result[key] = rows
-            else:
-                return json.dumps(rows, indent=indent)
+        reason_str = str(e)
+        if "timed out" in reason_str.lower() or "timeout" in reason_str.lower():
+            reason_code = "TIMEOUT_EXCEEDED"
+            action = "Request chunked generation or use 'Gemini step in'."
         else:
-            if ":" in line:
-                k, v = line.split(":", 1)
-                try:
-                    result[k.strip()] = json.loads(v.strip())
-                except Exception:
-                    result[k.strip()] = v.strip()
-            i += 1
-
-    if expand_paths == "safe":
-        expanded_result = {}
-        for k, v in result.items():
-            parts = k.split(".")
-            curr = expanded_result
-            for part in parts[:-1]:
-                curr = curr.setdefault(part, {})
-            curr[parts[-1]] = v
-        result = expanded_result
-
-    return json.dumps(result, indent=indent)
+            reason_code = "UNKNOWN_ERROR"
+            action = "Retry query."
+        diag = {
+            "status": "ERROR",
+            "reason_code": reason_code,
+            "message": f"Unexpected error: {reason_str}",
+            "action_recommendation": action
+        }
+        return json.dumps(diag), True
 
 def respond(response_id, result=None, error=None):
     if response_id is None:
@@ -259,7 +300,6 @@ def respond(response_id, result=None, error=None):
     sys.stdout.flush()
 
 def main():
-    log_stderr("Starting MCP-SOL Kimi Fast & TOON Server (v1.2.0)")
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -305,10 +345,13 @@ def main():
                                     "type": "string",
                                     "description": "The detailed instructions or code query."
                                 },
+                                "use_toon": {
+                                    "type": "boolean",
+                                    "description": "Whether to request output formatted in TOON (Token-Oriented Object Notation)."
+                                },
                                 "timeout_seconds": {
                                     "type": "number",
-                                    "description": "Optional timeout limit in seconds (default: 25s).",
-                                    "default": 25
+                                    "description": "Custom timeout in seconds (default 25s)."
                                 }
                             },
                             "required": ["prompt"]
@@ -316,69 +359,62 @@ def main():
                     },
                     {
                         "name": "encode_toon",
-                        "description": "Converts JSON data into the compact TOON format to save LLM tokens.",
+                        "description": "Convert JSON data into compact TOON format to save LLM tokens.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "json": {
                                     "type": "string",
-                                    "description": "The JSON data (serialized as a string) to encode."
+                                    "description": "JSON string to encode into TOON format."
                                 },
-                                "indent": {
-                                    "type": "number",
-                                    "description": "Number of spaces for indentation.",
-                                    "default": 2
-                                },
-                                "delimiter": {
+                                "json_data": {
                                     "type": "string",
-                                    "description": "Delimiter for arrays/rows. Options: ',', '\\t', '|'.",
-                                    "default": ","
-                                },
-                                "keyFolding": {
-                                    "type": "string",
-                                    "description": "Collapse single-key wrapper chains (e.g. a.b.c). Options: 'off', 'safe'.",
-                                    "default": "off"
-                                },
-                                "flattenDepth": {
-                                    "type": "number",
-                                    "description": "Maximum depth to apply key folding."
-                                },
-                                "replacer": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "Array of properties to include in the output."
+                                    "description": "Alias for json argument."
                                 }
-                            },
-                            "required": ["json"]
+                            }
                         }
                     },
                     {
                         "name": "decode_toon",
-                        "description": "Parses TOON formatted text back into standard JSON string.",
+                        "description": "Convert TOON formatted string back into standard JSON format.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "toon": {
                                     "type": "string",
-                                    "description": "The TOON formatted string to decode."
+                                    "description": "TOON formatted string to decode."
                                 },
-                                "strict": {
-                                    "type": "boolean",
-                                    "description": "Enforce strict validation (e.g., checking declared array lengths).",
-                                    "default": True
-                                },
-                                "expandPaths": {
+                                "toon_data": {
                                     "type": "string",
-                                    "description": "Reconstruct dotted keys into nested objects. Options: 'off', 'safe'.",
-                                    "default": "off"
-                                },
-                                "indent": {
-                                    "type": "number",
-                                    "description": "Number of spaces for output JSON indentation.",
-                                    "default": 2
+                                    "description": "Alias for toon argument."
                                 }
-                            },
-                            "required": ["toon"]
+                            }
+                        }
+                    },
+                    {
+                        "name": "toon_encode",
+                        "description": "Alias for encode_toon tool.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "json_data": {
+                                    "type": "string",
+                                    "description": "JSON string to encode into TOON format."
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "toon_decode",
+                        "description": "Alias for decode_toon tool.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "toon_data": {
+                                    "type": "string",
+                                    "description": "TOON formatted string to decode."
+                                }
+                            }
                         }
                     }
                 ]
@@ -390,50 +426,35 @@ def main():
             
             if name == "query_kimi":
                 prompt = arguments.get("prompt", "")
+                use_toon = arguments.get("use_toon", False)
                 timeout_sec = arguments.get("timeout_seconds", None)
-                result_text, is_error = query_kimi(prompt, timeout_seconds=timeout_sec)
+                result_text, is_error = query_kimi(prompt, use_toon=use_toon, timeout_seconds=timeout_sec)
+                
                 payload = {
-                    "content": [{"type": "text", "text": result_text}]
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": result_text
+                        }
+                    ]
                 }
                 if is_error:
                     payload["isError"] = True
                 respond(req_id, payload)
-            elif name == "encode_toon":
-                json_data = arguments.get("json", "{}")
-                indent = arguments.get("indent", 2)
-                delimiter = arguments.get("delimiter", ",")
-                key_folding = arguments.get("keyFolding", "off")
-                flatten_depth = arguments.get("flattenDepth", float('inf'))
-                replacer = arguments.get("replacer", None)
-
+            elif name in ("encode_toon", "toon_encode"):
+                json_str = arguments.get("json") or arguments.get("json_data") or "{}"
                 try:
-                    toon_output = encode_toon(
-                        json_data, 
-                        indent=indent, 
-                        delimiter=delimiter, 
-                        key_folding=key_folding, 
-                        flatten_depth=flatten_depth, 
-                        replacer=replacer
-                    )
-                    respond(req_id, {"content": [{"type": "text", "text": toon_output}]})
+                    toon_result = encode_toon(json_str)
+                    respond(req_id, {"content": [{"type": "text", "text": toon_result}]})
                 except Exception as e:
-                    respond(req_id, payload={"content": [{"type": "text", "text": f"Encoding Error: {str(e)}"}], "isError": True})
-            elif name == "decode_toon":
-                toon_data = arguments.get("toon", "")
-                strict = arguments.get("strict", True)
-                expand_paths = arguments.get("expandPaths", "off")
-                indent = arguments.get("indent", 2)
-
+                    respond(req_id, {"content": [{"type": "text", "text": f"Encoding Error: {str(e)}"}], "isError": True})
+            elif name in ("decode_toon", "toon_decode"):
+                toon_str = arguments.get("toon") or arguments.get("toon_data") or ""
                 try:
-                    json_output = decode_toon(
-                        toon_data, 
-                        strict=strict, 
-                        expand_paths=expand_paths, 
-                        indent=indent
-                    )
-                    respond(req_id, {"content": [{"type": "text", "text": json_output}]})
+                    json_result = decode_toon(toon_str)
+                    respond(req_id, {"content": [{"type": "text", "text": json_result}]})
                 except Exception as e:
-                    respond(req_id, payload={"content": [{"type": "text", "text": f"Decoding Error: {str(e)}"}], "isError": True})
+                    respond(req_id, {"content": [{"type": "text", "text": f"Decoding Error: {str(e)}"}], "isError": True})
             else:
                 respond(req_id, error={"code": -32601, "message": f"Method '{name}' not found"})
         else:
