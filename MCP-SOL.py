@@ -2,15 +2,28 @@ import sys
 import json
 import os
 import re
+import socket
 import urllib.request
 import urllib.error
+from datetime import datetime
 
 # Environment Variable support (fallback to default string if not set in environment)
 API_KEY = os.environ.get("FIREWORKS_API_KEY", "YOUR_FIREWORKS_API_KEY")
 API_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 MODEL_NAME = "accounts/fireworks/routers/kimi-k3-fast"
 
-def query_kimi(prompt):
+# Default timeout in seconds (configurable via FIREWORKS_TIMEOUT env var, default 25s)
+DEFAULT_TIMEOUT = int(os.environ.get("FIREWORKS_TIMEOUT", "25"))
+
+def log_stderr(message):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sys.stderr.write(f"[{timestamp}] [MCP-SOL] {message}\n")
+    sys.stderr.flush()
+
+def query_kimi(prompt, timeout_seconds=None):
+    timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_TIMEOUT
+    log_stderr(f"Initiating request to Fireworks AI (Model: {MODEL_NAME}, Timeout: {timeout}s)")
+    
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
@@ -30,27 +43,77 @@ def query_kimi(prompt):
     )
     
     try:
-        # Added explicit timeout (180 seconds / 3 minutes)
-        with urllib.request.urlopen(req, timeout=180) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             res_data = json.loads(response.read().decode('utf-8'))
             
             if "choices" in res_data and len(res_data["choices"]) > 0:
+                log_stderr("Request completed successfully.")
                 return res_data["choices"][0]["message"]["content"], False
             elif "error" in res_data:
-                return f"API Error: {res_data['error']}", True
+                err_msg = json.dumps(res_data["error"])
+                log_stderr(f"API Error payload returned: {err_msg}")
+                diag = format_diagnostic_error("FIREWORKS_API_ERROR", f"Fireworks API Error: {err_msg}")
+                return diag, True
             else:
-                return f"Unexpected response format: {json.dumps(res_data)}", True
+                diag = format_diagnostic_error("UNEXPECTED_RESPONSE_FORMAT", f"Unexpected format: {json.dumps(res_data)}")
+                return diag, True
 
     except urllib.error.HTTPError as e:
+        code = e.code
         try:
             err_body = e.read().decode('utf-8')
-            return f"HTTP Error {e.code}: {err_body}", True
         except Exception:
-            return f"HTTP Error {e.code}: {e.reason}", True
+            err_body = str(e.reason)
+            
+        reason_code = f"HTTP_{code}"
+        if code == 401:
+            reason_code = "UNAUTHORIZED_401"
+        elif code == 429:
+            reason_code = "RATE_LIMITED_429"
+        elif code in (500, 502, 503, 504):
+            reason_code = f"SERVERLESS_OVERLOAD_{code}"
+
+        log_stderr(f"HTTPError {code}: {reason_code} - {err_body}")
+        diag = format_diagnostic_error(reason_code, f"HTTP {code} ({e.reason}): {err_body}")
+        return diag, True
+
     except urllib.error.URLError as e:
-        return f"Network Error: {e.reason}", True
+        if isinstance(e.reason, socket.timeout) or "timed out" in str(e.reason).lower():
+            reason_code = "TIMEOUT_EXCEEDED"
+            msg = f"Fireworks AI serverless API timed out after {timeout}s. Endpoint hung before returning tokens."
+        else:
+            reason_code = "NETWORK_UNREACHABLE"
+            msg = f"Network connection failed: {e.reason}"
+            
+        log_stderr(f"URLError: {reason_code} - {msg}")
+        diag = format_diagnostic_error(reason_code, msg, timeout_seconds=timeout)
+        return diag, True
+
+    except TimeoutError:
+        reason_code = "TIMEOUT_EXCEEDED"
+        msg = f"Fireworks AI serverless API timed out after {timeout}s."
+        log_stderr(f"TimeoutError: {reason_code} - {msg}")
+        diag = format_diagnostic_error(reason_code, msg, timeout_seconds=timeout)
+        return diag, True
+
     except Exception as e:
-        return f"Unexpected error: {str(e)}", True
+        reason_code = "UNKNOWN_FAILURE"
+        msg = f"Unexpected error: {str(e)}"
+        log_stderr(f"Exception: {reason_code} - {msg}")
+        diag = format_diagnostic_error(reason_code, msg)
+        return diag, True
+
+def format_diagnostic_error(reason_code, details, timeout_seconds=None):
+    error_payload = {
+        "status": "ERROR",
+        "reason_code": reason_code,
+        "details": details,
+        "timestamp": datetime.now().isoformat(),
+        "action_recommendation": "Fireworks serverless call stalled/failed. Switch to Orchestrator (Gemini step-in) or retry with smaller prompt context."
+    }
+    if timeout_seconds:
+        error_payload["configured_timeout_seconds"] = timeout_seconds
+    return json.dumps(error_payload, indent=2)
 
 def encode_toon(json_input, indent=2, delimiter=',', key_folding="off", flatten_depth=float('inf'), replacer=None):
     if isinstance(json_input, str):
@@ -196,6 +259,7 @@ def respond(response_id, result=None, error=None):
     sys.stdout.flush()
 
 def main():
+    log_stderr("Starting MCP-SOL Kimi Fast & TOON Server (v1.2.0)")
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -223,7 +287,7 @@ def main():
                 },
                 "serverInfo": {
                     "name": "kimi-k3-fast-mcp-server",
-                    "version": "1.1.0"
+                    "version": "1.2.0"
                 }
             })
         elif method and method.startswith("notifications/"):
@@ -240,6 +304,11 @@ def main():
                                 "prompt": {
                                     "type": "string",
                                     "description": "The detailed instructions or code query."
+                                },
+                                "timeout_seconds": {
+                                    "type": "number",
+                                    "description": "Optional timeout limit in seconds (default: 25s).",
+                                    "default": 25
                                 }
                             },
                             "required": ["prompt"]
@@ -321,7 +390,8 @@ def main():
             
             if name == "query_kimi":
                 prompt = arguments.get("prompt", "")
-                result_text, is_error = query_kimi(prompt)
+                timeout_sec = arguments.get("timeout_seconds", None)
+                result_text, is_error = query_kimi(prompt, timeout_seconds=timeout_sec)
                 payload = {
                     "content": [{"type": "text", "text": result_text}]
                 }
