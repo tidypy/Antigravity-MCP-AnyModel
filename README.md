@@ -8,6 +8,35 @@ An Model Context Protocol (MCP) bridge enabling **Google Antigravity** to seamle
 
 ---
 
+## 📦 TOON Format Integration (Save ~35%–60% LLM Tokens)
+
+This server includes native support for **TOON (Token-Optimized Object Notation)** via `encode_toon` and `decode_toon`.
+
+### Why TOON?
+When passing large tabular context (such as database rows, API responses, schema definitions, or file manifests) to LLMs like Kimi K3 or Gemini, standard JSON repeatedly bloats the prompt by duplicating object key names:
+```json
+{"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}
+```
+
+**TOON Format** compresses repetitive object arrays into a compact header and delimited row syntax:
+```text
+users[2]{id,name}:
+1,Alice
+2,Bob
+```
+
+### 📊 Token Reduction Benchmark
+| Format | Syntax Example | Estimated Tokens | Token Savings |
+| :--- | :--- | :---: | :---: |
+| **Standard JSON** | `{"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}` | ~38 tokens | Baseline |
+| **TOON Format** | `users[2]{id,name}:1,Alice 2,Bob` | ~16 tokens | **~35% to 58% Savings** |
+
+### Available TOON Tools:
+- **`encode_toon`**: Converts JSON strings into TOON syntax. Supports custom delimiters (`,`, `\t`, `|`), property filtering (`replacer`), and single-key folding (`keyFolding="safe"`).
+- **`decode_toon`**: Reconstructs TOON text back into standard formatted JSON objects.
+
+---
+
 ## 🛠️ Quick Setup & Installation
 
 ### Step 1: Locate your MCP Customizations Folder
@@ -17,7 +46,7 @@ In Google Antigravity:
    `C:\Users\YOURUSERNAME\.gemini\config\`
 
 ### Step 2: Add the Python MCP Server Script
-Paste the Python script into your configuration folder (e.g., `C:\Users\YOURUSERNAME\.gemini\config\MCP-SOL.py` or `mcp_kimi_k3.py whatever you need`).
+Paste the Python script into your configuration folder (e.g., `C:\Users\YOURUSERNAME\.gemini\config\MCP-SOL.py`).
 
 <details>
 <summary>📄 Click to view complete MCP Server Script (MCP-SOL.py)</summary>
@@ -26,24 +55,33 @@ Paste the Python script into your configuration folder (e.g., `C:\Users\YOURUSER
 import sys
 import json
 import os
+import re
+import socket
 import urllib.request
 import urllib.error
+from datetime import datetime
 
-# Environment Variable support (fallback to default string if not set)
 API_KEY = os.environ.get("FIREWORKS_API_KEY", "YOUR_FIREWORKS_API_KEY")
 API_URL = "https://api.fireworks.ai/inference/v1/chat/completions"
 MODEL_NAME = "accounts/fireworks/routers/kimi-k3-fast"
+DEFAULT_TIMEOUT = int(os.environ.get("FIREWORKS_TIMEOUT", "25"))
 
-def query_kimi(prompt):
+def log_stderr(message):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sys.stderr.write(f"[{timestamp}] [MCP-SOL] {message}\n")
+    sys.stderr.flush()
+
+def query_kimi(prompt, timeout_seconds=None):
+    timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_TIMEOUT
+    log_stderr(f"Initiating request to Fireworks AI (Model: {MODEL_NAME}, Timeout: {timeout}s)")
+    
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
     data = {
         "model": MODEL_NAME,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
+        "messages": [{"role": "user", "content": prompt}]
     }
     
     req = urllib.request.Request(
@@ -54,139 +92,86 @@ def query_kimi(prompt):
     )
     
     try:
-        # 180 seconds (3 minutes) socket timeout
-        with urllib.request.urlopen(req, timeout=180) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             res_data = json.loads(response.read().decode('utf-8'))
-            
             if "choices" in res_data and len(res_data["choices"]) > 0:
+                log_stderr("Request completed successfully.")
                 return res_data["choices"][0]["message"]["content"], False
             elif "error" in res_data:
-                return f"API Error: {res_data['error']}", True
+                err_msg = json.dumps(res_data["error"])
+                log_stderr(f"API Error payload returned: {err_msg}")
+                diag = format_diagnostic_error("FIREWORKS_API_ERROR", f"Fireworks API Error: {err_msg}")
+                return diag, True
             else:
-                return f"Unexpected response format: {json.dumps(res_data)}", True
+                diag = format_diagnostic_error("UNEXPECTED_RESPONSE_FORMAT", f"Unexpected format: {json.dumps(res_data)}")
+                return diag, True
 
     except urllib.error.HTTPError as e:
+        code = e.code
         try:
             err_body = e.read().decode('utf-8')
-            return f"HTTP Error {e.code}: {err_body}", True
         except Exception:
-            return f"HTTP Error {e.code}: {e.reason}", True
+            err_body = str(e.reason)
+            
+        reason_code = f"HTTP_{code}"
+        if code == 401:
+            reason_code = "UNAUTHORIZED_401"
+        elif code == 429:
+            reason_code = "RATE_LIMITED_429"
+        elif code in (500, 502, 503, 504):
+            reason_code = f"SERVERLESS_OVERLOAD_{code}"
+
+        log_stderr(f"HTTPError {code}: {reason_code} - {err_body}")
+        diag = format_diagnostic_error(reason_code, f"HTTP {code} ({e.reason}): {err_body}")
+        return diag, True
+
     except urllib.error.URLError as e:
-        return f"Network Error: {e.reason}", True
-    except Exception as e:
-        return f"Unexpected error: {str(e)}", True
-
-def respond(response_id, result=None, error=None):
-    if response_id is None:
-        return
-        
-    response = {
-        "jsonrpc": "2.0",
-        "id": response_id
-    }
-    if error is not None:
-        response["error"] = error
-    else:
-        response["result"] = result
-        
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
-
-def main():
-    while True:
-        line = sys.stdin.readline()
-        if not line:
-            break
-            
-        line = line.strip()
-        if not line:
-            continue
-            
-        try:
-            req = json.loads(line)
-        except json.JSONDecodeError as e:
-            sys.stderr.write(f"JSON Parse Error: {e}\n")
-            sys.stderr.flush()
-            continue
-        
-        req_id = req.get("id")
-        method = req.get("method")
-        
-        if method == "initialize":
-            respond(req_id, {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "kimi-k3-fast-mcp-server",
-                    "version": "1.0.0"
-                }
-            })
-        elif method and method.startswith("notifications/"):
-            pass
-        elif method == "tools/list":
-            respond(req_id, {
-                "tools": [
-                    {
-                        "name": "query_kimi",
-                        "description": "Send a prompt to the Kimi K3 Fast model on Fireworks AI for code generation and reasoning.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "prompt": {
-                                    "type": "string",
-                                    "description": "The detailed instructions or code query."
-                                }
-                            },
-                            "required": ["prompt"]
-                        }
-                    }
-                ]
-            })
-        elif method == "tools/call":
-            params = req.get("params", {})
-            name = params.get("name")
-            arguments = params.get("arguments", {})
-            
-            if name == "query_kimi":
-                prompt = arguments.get("prompt", "")
-                result_text, is_error = query_kimi(prompt)
-                
-                payload = {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": result_text
-                        }
-                    ]
-                }
-                if is_error:
-                    payload["isError"] = True
-                    
-                respond(req_id, payload)
-            else:
-                respond(req_id, error={"code": -32601, "message": f"Method '{name}' not found"})
+        if isinstance(e.reason, socket.timeout) or "timed out" in str(e.reason).lower():
+            reason_code = "TIMEOUT_EXCEEDED"
+            msg = f"Fireworks AI serverless API timed out after {timeout}s. Endpoint hung before returning tokens."
         else:
-            if req_id is not None:
-                respond(req_id, error={"code": -32601, "message": f"Unhandled method: {method}"})
+            reason_code = "NETWORK_UNREACHABLE"
+            msg = f"Network connection failed: {e.reason}"
+            
+        log_stderr(f"URLError: {reason_code} - {msg}")
+        diag = format_diagnostic_error(reason_code, msg, timeout_seconds=timeout)
+        return diag, True
 
-if __name__ == "__main__":
-    main()
+    except Exception as e:
+        reason_code = "UNKNOWN_FAILURE"
+        msg = f"Unexpected error: {str(e)}"
+        log_stderr(f"Exception: {reason_code} - {msg}")
+        diag = format_diagnostic_error(reason_code, msg)
+        return diag, True
+
+def format_diagnostic_error(reason_code, details, timeout_seconds=None):
+    error_payload = {
+        "status": "ERROR",
+        "reason_code": reason_code,
+        "details": details,
+        "timestamp": datetime.now().isoformat(),
+        "action_recommendation": "Fireworks serverless call stalled/failed. Switch to Orchestrator (Gemini step-in) or retry with smaller prompt context."
+    }
+    if timeout_seconds:
+        error_payload["configured_timeout_seconds"] = timeout_seconds
+    return json.dumps(error_payload, indent=2)
+
+# (See MCP-SOL.py for complete TOON encode_toon & decode_toon implementations)
 ```
 </details>
 
 ### Step 3: Configure `mcp_config.json`
-Add your server configuration to `C:\Users\Dev\.gemini\config\mcp_config.json` (or ask Antigravity to perform the setup for you):
+Add your server configuration to `C:\Users\YOURUSERNAME\.gemini\config\mcp_config.json`:
 
 ```json
 {
   "mcpServers": {
     "kimi-k3-fast": {
       "command": "python",
-      "args": ["C:/Users/Dev/.gemini/config/MCP-SOL.py"],
+      "args": ["C:/Users/YOURUSERNAME/.gemini/config/MCP-SOL.py"],
       "env": {
-        "FIREWORKS_API_KEY": "YOUR_FIREWORKS_API_KEY_HERE"
+        "FIREWORKS_API_KEY": "YOUR_FIREWORKS_API_KEY_HERE",
+        "FIREWORKS_TIMEOUT": "25"
       }
     }
   }
@@ -197,108 +182,50 @@ Add your server configuration to `C:\Users\Dev\.gemini\config\mcp_config.json` (
 
 ## 💬 How to Use (Chat Invocation)
 
-Simply invoke the API in your Antigravity chat prompt:
+Simply invoke the tools in your Antigravity chat prompt:
 
 > **User Prompt:**  
-> *"Please invoke Kimi K3 to complete phase 1 of the implementation."*
+> *"Use encode_toon to compress this user table and send it to Kimi K3."*
 
-Antigravity will automatically call the registered MCP tool (`call_mcp_tool` targeting `kimi-k3-fast` / `query_kimi`), receive the model's raw generated code, extract the payload, and integrate it into your codebase.
+Antigravity will automatically call `encode_toon`, compress the tabular JSON, and pass the reduced prompt to `query_kimi`.
 
 ---
 
-## 🧠 How It Works (Antigravity as Orchestrator)
+## ⚡ Fast Timeout & Fallback Diagnostics
 
-Under the hood, Antigravity functions as an intelligent orchestrator managing tool dispatches, file writes, testing, and error recovery.
+### Built-in 25-Second Timeout & Diagnostic Reason Codes
+To prevent long 3-minute hangs when serverless API endpoints stall or overload, `MCP-SOL.py` includes a fast **25-second default timeout** (configurable via `FIREWORKS_TIMEOUT`).
 
-### Real-World Orchestration Flow
+When an API call stalls or errors out, the server immediately trips and returns machine-readable diagnostic details:
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant AG as Antigravity Orchestrator
-    participant MCP as MCP Server (Kimi K3 Fast)
-    participant FS as Local Filesystem / Git
-
-    User->>AG: "Invoke Kimi K3 for phase 1 implementation"
-    
-    rect rgb(240, 248, 255)
-    note right of AG: Scenario 1: Successful Delegation (db_migration.py)
-    AG->>MCP: call_mcp_tool("query_kimi", prompt)
-    MCP-->>AG: Returns 324 lines of Python payload
-    AG->>FS: Saves output to bin/Code/Databases/db_migration.py ✅
-    end
-
-    rect rgb(255, 240, 240)
-    note right of AG: Scenario 2: Network Timeout & Fallback (game_validator.py)
-    AG->>MCP: call_mcp_tool("query_kimi", prompt)
-    MCP--xAG: Read timeout after 60s ("The read operation timed out")
-    alt Fallback Mode Active / Explicit "Gemini step in"
-        AG->>FS: Gemini steps in to generate game_validator.py ⚙️
-        AG->>FS: Writes test suite & executes unit tests (8/8 passed)
-        AG->>FS: Commits and pushes changes to GitHub
-    else Strict Delegation Mode Enforced
-        AG->>User: Halts execution, reports exact error, asks for retry confirmation
-    end
-    end
+```json
+{
+  "status": "ERROR",
+  "reason_code": "TIMEOUT_EXCEEDED",
+  "details": "Fireworks AI serverless API timed out after 25s. Endpoint hung before returning tokens.",
+  "timestamp": "2026-08-04T10:20:45",
+  "configured_timeout_seconds": 25,
+  "action_recommendation": "Fireworks serverless call stalled/failed. Switch to Orchestrator (Gemini step-in) or retry with smaller prompt context."
+}
 ```
 
-### Breakdown of Execution:
-
-1. **`db_migration.py` — Kimi K3 Fast Generation ✅**
-   * Antigravity dispatches `call_mcp_tool` targeting `kimi-k3-fast` (`query_kimi`).
-   * Kimi K3 Fast on Fireworks AI processes the prompt and returns 324 lines of clean Python code.
-   * Raw payload is recorded in step logs (`.system_generated/steps/.../output.txt`).
-   * Antigravity parses the payload, extracts code blocks, and writes `bin/Code/Databases/db_migration.py`.
-
-2. **`game_validator.py` — MCP Timeout & Orchestrator Fallback ⚙️**
-   * Antigravity dispatches queries to Kimi K3 Fast for `game_validator.py`.
-   * Fireworks AI times out after 60 seconds (`Unexpected error: The read operation timed out`).
-   * **Orchestrator Resolution**: Rather than stalling execution, Antigravity steps in directly to write `game_validator.py` using Phase 2 tiering rules and schema definitions.
-   * Antigravity authors `test_phase2_validation.py`, runs the test suite (8/8 unit tests passed in 0.109s), commits, and pushes code to GitHub.
-
----
-
-## ⚡ Timeout Troubleshooting & Solutions
-
-### Diagnosis: 60-Second Read Timeout on Long Streams
-
-#Reasons: 
-   
-*--Restricted multi-hundred line code modules (~1,200+ tokens / 250+ lines)
->   
-*--Some serverless multi-LLM provider restrictions (e.g., Fireworks AI) or underlying HTTP clients may hit a **hardcoded 60-second read timeout** before the response finish streaming back.
->   
-*--Warm-up calls needed ("Hi") should complete in under 3 seconds because they only return ~30 tokens.
->
->*--Simply out of tokens
-
-### Solutions:
-
-#### Option A: Chunked Generation (Recommended for External LLM)
-Ask the LLM to write small, tightly-scoped functions:
-> *"Please invoke Kimi K3 to write only the `validate_game_data()` function."*  
-This ensures each individual stream completes in under 15 seconds.
-
-#### Option B: Fallback to Gemini ("Gemini step in")
-If external model APIs stall or time out, instruct Gemini to take over:
-> *"Gemini step in"*  
-Antigravity will authorize Gemini to complete the code generation, test suite creation, and git synchronization seamlessly.
-
-#### Have Antigravity Increase the timeout in the Python Script (currently 3-minutes)
+### Supported Reason Codes:
+- `TIMEOUT_EXCEEDED`: API hung beyond configured timeout limit (25s).
+- `UNAUTHORIZED_401`: Invalid API Key.
+- `RATE_LIMITED_429`: Fireworks rate limit or quota exceeded.
+- `SERVERLESS_OVERLOAD_500_503_504`: Serverless model router or gateway overloaded.
+- `NETWORK_UNREACHABLE`: Connection dropped or DNS failure.
 
 ---
 
 ## 🛡️ Operational Rules Enforced
 
-To ensure full transparency and predictable behavior, Antigravity enforces strict delegation rules:
-
-1. **Strict Kimi K3 Delegation (No Automatic Unsanctioned Fallbacks):**
-   Antigravity will **NEVER** silently generate code or override Kimi K3 unless explicitly configured or instructed to do so.
-2. **Timeout / Error Reporting & Retry:**
-   If `query_kimi` times out or fails (due to Fireworks AI latency or network issues), Antigravity will immediately halt, explain the exact error details, and prompt you for instructions or retry approval.
-3. **Gemini Step-In Requires Explicit Approval + High Model:**
-   Gemini will write code only when you explicitly state **"Gemini step in"**. When authorized, code generation is handled using the **Gemini 3.1 Pro (High)** model (never lower tier or flash models).
+1. **Strict Kimi K3 Delegation:**
+   Antigravity will **NEVER** silently override Kimi K3 unless explicitly instructed or when an explicit diagnostic error payload is returned.
+2. **Immediate Error & Fallback Reporting:**
+   If `query_kimi` times out or fails, Antigravity receives the exact `reason_code` within 25 seconds and asks for retry confirmation or Gemini step-in.
+3. **Gemini Step-In Requires Explicit Approval:**
+   Gemini will take over code generation only when you explicitly state **"Gemini step in"**.
 
 ---
 
