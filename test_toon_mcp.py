@@ -78,5 +78,30 @@ class TestMCPServerTOON(unittest.TestCase):
         self.assertEqual(len(data["users"]), 2)
         self.assertEqual(data["users"][0]["name"], "Alice")
 
+    def test_timeout_fallback_diagnostics_zero_cost(self):
+        """Tests fast 1-second timeout fallback diagnostics without calling real model or spending money."""
+        self.send_rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        
+        # Pass a 0.0001 second timeout to instantly trigger TIMEOUT_EXCEEDED without spending credits
+        call_res = self.send_rpc({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "query_kimi",
+                "arguments": {
+                    "prompt": "Test prompt",
+                    "timeout_seconds": 0.0001
+                }
+            }
+        })
+        
+        result_payload = call_res["result"]
+        self.assertTrue(result_payload.get("isError"))
+        diag_json = json.loads(result_payload["content"][0]["text"])
+        self.assertEqual(diag_json["status"], "ERROR")
+        self.assertIn(diag_json["reason_code"], ["TIMEOUT_EXCEEDED", "NETWORK_UNREACHABLE"])
+        self.assertIn("action_recommendation", diag_json)
+
 if __name__ == "__main__":
     unittest.main()
