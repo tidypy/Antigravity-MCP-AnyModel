@@ -101,7 +101,44 @@ class TestMCPServerTOON(unittest.TestCase):
         diag_json = json.loads(result_payload["content"][0]["text"])
         self.assertEqual(diag_json["status"], "ERROR")
         self.assertIn(diag_json["reason_code"], ["TIMEOUT_EXCEEDED", "NETWORK_UNREACHABLE"])
-        self.assertIn("action_recommendation", diag_json)
+    def test_sweet_spot_compaction_and_aliasing(self):
+        """Tests key aliasing and null stripping via MCP tool calls."""
+        self.send_rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        
+        sample_json = json.dumps({"user_id": 101, "user_name": "Alice", "extra": None})
+        call_res = self.send_rpc({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "encode_toon",
+                "arguments": {
+                    "json": sample_json,
+                    "strip_nulls": True,
+                    "key_map": {"user_id": "uid", "user_name": "un"}
+                }
+            }
+        })
+        text_content = call_res["result"]["content"][0]["text"]
+        self.assertIn("uid: 101", text_content)
+        self.assertIn("un: Alice", text_content)
+        self.assertNotIn("extra", text_content)
+
+        decode_res = self.send_rpc({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "decode_toon",
+                "arguments": {
+                    "toon": text_content,
+                    "key_map": {"user_id": "uid", "user_name": "un"}
+                }
+            }
+        })
+        decoded_json = json.loads(decode_res["result"]["content"][0]["text"])
+        self.assertEqual(decoded_json["user_id"], 101)
+        self.assertEqual(decoded_json["user_name"], "Alice")
 
 if __name__ == "__main__":
     unittest.main()

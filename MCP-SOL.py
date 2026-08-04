@@ -55,12 +55,36 @@ def _split_fields(line):
 def _is_flat_dict(d):
     return isinstance(d, dict) and all(isinstance(v, (str, int, float, bool, type(None))) for v in d.values())
 
-def toon_encode(obj, indent=0):
-    """
-    Encodes Python dictionary/list/primitive into TOON format.
-    Minimizes token usage using YAML-style indentation and CSV-style tabular headers for arrays.
-    """
-    prefix = "  " * indent
+def _validate_key_map(key_map):
+    """Validates that key_map is a dictionary with unique values for lossless inversion."""
+    if not key_map:
+        return
+    if not isinstance(key_map, dict):
+        raise ValueError("key_map must be a dictionary")
+    if len(set(key_map.values())) != len(key_map):
+        raise ValueError("key_map aliases must be unique for lossless bi-directional conversion")
+
+def _transform_obj(obj, strip_nulls=False, key_map=None):
+    """Transforms an object by stripping nulls and applying key aliasing maps without silent key collisions."""
+    if not strip_nulls and not key_map:
+        return obj
+    if isinstance(obj, dict):
+        new_dict = {}
+        for k, v in obj.items():
+            if strip_nulls and v is None:
+                continue
+            mapped_key = key_map.get(k, k) if key_map else k
+            if mapped_key in new_dict:
+                raise ValueError(f"Key collision detected: '{k}' -> '{mapped_key}' conflicts with existing key in object")
+            new_dict[mapped_key] = _transform_obj(v, strip_nulls=strip_nulls, key_map=key_map)
+        return new_dict
+    elif isinstance(obj, (list, tuple)):
+        return [_transform_obj(x, strip_nulls=strip_nulls, key_map=key_map) for x in obj]
+    return obj
+
+def _toon_encode_internal(obj, indent=0, indent_size=2):
+    """Internal recursive TOON serializer."""
+    prefix = (" " * indent_size) * indent
     if obj is None:
         return "null"
     elif isinstance(obj, bool):
@@ -81,46 +105,59 @@ def toon_encode(obj, indent=0):
                     col_str = ",".join(_encode_str(c) for c in cols)
                     lines.append(f"{prefix}{encoded_key}[{len(v)}]{{{col_str}}}:")
                     for row in v:
-                        row_vals = [toon_encode(row.get(c)) for c in cols]
-                        lines.append(f"{prefix}  " + ",".join(row_vals))
+                        row_vals = [_toon_encode_internal(row.get(c), indent=0, indent_size=indent_size) for c in cols]
+                        lines.append(f"{prefix}" + (" " * indent_size) + ",".join(row_vals))
                 else:
                     lines.append(f"{prefix}{encoded_key}:")
                     for item in v:
-                        lines.append(f"{prefix}  -")
-                        lines.append(toon_encode(item, indent + 2))
+                        lines.append(f"{prefix}" + (" " * indent_size) + "-")
+                        lines.append(_toon_encode_internal(item, indent=indent + 2, indent_size=indent_size))
             elif isinstance(v, list) and v and all(not isinstance(x, (dict, list)) for x in v):
-                lines.append(f"{prefix}{encoded_key}[{len(v)}]: " + ",".join(toon_encode(x) for x in v))
+                lines.append(f"{prefix}{encoded_key}[{len(v)}]: " + ",".join(_toon_encode_internal(x, indent=0, indent_size=indent_size) for x in v))
             elif isinstance(v, dict):
                 lines.append(f"{prefix}{encoded_key}:")
-                sub = toon_encode(v, indent + 1)
+                sub = _toon_encode_internal(v, indent=indent + 1, indent_size=indent_size)
                 if sub:
                     lines.append(sub)
             elif isinstance(v, list):
                 lines.append(f"{prefix}{encoded_key}:")
                 for x in v:
-                    lines.append(f"{prefix}  - " + toon_encode(x))
+                    lines.append(f"{prefix}" + (" " * indent_size) + "- " + _toon_encode_internal(x, indent=0, indent_size=indent_size))
             else:
-                lines.append(f"{prefix}{encoded_key}: {toon_encode(v)}")
+                lines.append(f"{prefix}{encoded_key}: {_toon_encode_internal(v, indent=0, indent_size=indent_size)}")
         return "\n".join(lines)
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         if not obj:
             return "[]"
         if all(isinstance(x, dict) for x in obj):
             cols = list(obj[0].keys())
             lines = [f"items[{len(obj)}]{{{','.join(_encode_str(c) for c in cols)}}}:"]
             for row in obj:
-                lines.append("  " + ",".join(toon_encode(row.get(c)) for c in cols))
+                lines.append((" " * indent_size) + ",".join(_toon_encode_internal(row.get(c), indent=0, indent_size=indent_size) for c in cols))
             return "\n".join(lines)
-        return ",".join(toon_encode(x) for x in obj)
+        return ",".join(_toon_encode_internal(x, indent=0, indent_size=indent_size) for x in obj)
     return _encode_str(str(obj))
 
-def encode_toon(json_data, indent=0, **kwargs):
+def toon_encode(obj, strip_nulls=False, key_map=None, indent_size=2):
+    """
+    Public entry point for TOON encoding.
+    Options:
+      - strip_nulls: Strips keys with None/null values to save extra tokens.
+      - key_map: Dictionary mapping verbose keys to short alias names (e.g. {'user_id': 'uid'}).
+      - indent_size: Indentation width in spaces (default 2, set to 1 for maximum token compacting).
+    """
+    _validate_key_map(key_map)
+    if strip_nulls or key_map:
+        obj = _transform_obj(obj, strip_nulls=strip_nulls, key_map=key_map)
+    return _toon_encode_internal(obj, indent=0, indent_size=indent_size)
+
+def encode_toon(json_data, strip_nulls=False, key_map=None, indent_size=2, **kwargs):
     """Wrapper that accepts JSON string or dict and returns TOON string."""
     if isinstance(json_data, str):
         obj = json.loads(json_data)
     else:
         obj = json_data
-    return toon_encode(obj, indent=indent)
+    return toon_encode(obj, strip_nulls=strip_nulls, key_map=key_map, indent_size=indent_size)
 
 def _parse_val(val_str):
     """Parses a scalar TOON value string into a Python object."""
@@ -141,8 +178,9 @@ def _parse_val(val_str):
     except ValueError:
         return val
 
-def toon_decode(toon_str):
+def toon_decode(toon_str, key_map=None):
     """Decodes a TOON formatted string back into standard Python dictionary/list structures."""
+    _validate_key_map(key_map)
     lines = [l for l in toon_str.splitlines() if l.strip()]
     if not lines:
         return {}
@@ -201,11 +239,15 @@ def toon_decode(toon_str):
                     current_obj[key] = _parse_val(val_part)
         i += 1
         
+    if key_map:
+        inv_map = {v: k for k, v in key_map.items()}
+        root = _transform_obj(root, strip_nulls=False, key_map=inv_map)
+
     return root
 
-def decode_toon(toon_str, **kwargs):
+def decode_toon(toon_str, key_map=None, **kwargs):
     """Wrapper that decodes TOON string and returns JSON string."""
-    decoded = toon_decode(toon_str)
+    decoded = toon_decode(toon_str, key_map=key_map)
     return json.dumps(decoded, indent=2)
 
 # ==========================================
@@ -354,7 +396,7 @@ def main():
                 },
                 "serverInfo": {
                     "name": "kimi-k3-fast-mcp-server",
-                    "version": "1.3.1"
+                    "version": "1.4.1"
                 }
             })
         elif method and method.startswith("notifications/"):
@@ -397,6 +439,14 @@ def main():
                                 "json_data": {
                                     "type": "string",
                                     "description": "Alias for json argument."
+                                },
+                                "strip_nulls": {
+                                    "type": "boolean",
+                                    "description": "Strip null values to save extra tokens."
+                                },
+                                "key_map": {
+                                    "type": "object",
+                                    "description": "Dictionary mapping verbose keys to short alias names."
                                 }
                             }
                         }
@@ -414,6 +464,10 @@ def main():
                                 "toon_data": {
                                     "type": "string",
                                     "description": "Alias for toon argument."
+                                },
+                                "key_map": {
+                                    "type": "object",
+                                    "description": "Dictionary mapping verbose keys to short alias names to reverse key mapping."
                                 }
                             }
                         }
@@ -427,6 +481,14 @@ def main():
                                 "json_data": {
                                     "type": "string",
                                     "description": "JSON string to encode into TOON format."
+                                },
+                                "strip_nulls": {
+                                    "type": "boolean",
+                                    "description": "Strip null values to save extra tokens."
+                                },
+                                "key_map": {
+                                    "type": "object",
+                                    "description": "Dictionary mapping verbose keys to short alias names."
                                 }
                             }
                         }
@@ -440,6 +502,10 @@ def main():
                                 "toon_data": {
                                     "type": "string",
                                     "description": "TOON formatted string to decode."
+                                },
+                                "key_map": {
+                                    "type": "object",
+                                    "description": "Dictionary mapping verbose keys to short alias names to reverse key mapping."
                                 }
                             }
                         }
@@ -470,15 +536,18 @@ def main():
                 respond(req_id, payload)
             elif name in ("encode_toon", "toon_encode"):
                 json_str = arguments.get("json") or arguments.get("json_data") or "{}"
+                strip_nulls = arguments.get("strip_nulls", False)
+                key_map = arguments.get("key_map", None)
                 try:
-                    toon_result = encode_toon(json_str)
+                    toon_result = encode_toon(json_str, strip_nulls=strip_nulls, key_map=key_map)
                     respond(req_id, {"content": [{"type": "text", "text": toon_result}]})
                 except Exception as e:
                     respond(req_id, {"content": [{"type": "text", "text": f"Encoding Error: {str(e)}"}], "isError": True})
             elif name in ("decode_toon", "toon_decode"):
                 toon_str = arguments.get("toon") or arguments.get("toon_data") or ""
+                key_map = arguments.get("key_map", None)
                 try:
-                    json_result = decode_toon(toon_str)
+                    json_result = decode_toon(toon_str, key_map=key_map)
                     respond(req_id, {"content": [{"type": "text", "text": json_result}]})
                 except Exception as e:
                     respond(req_id, {"content": [{"type": "text", "text": f"Decoding Error: {str(e)}"}], "isError": True})

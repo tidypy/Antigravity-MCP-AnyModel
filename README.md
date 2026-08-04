@@ -417,9 +417,9 @@ Add your server configuration to `C:\Users\Dev\.gemini\config\mcp_config.json` (
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| **`query_kimi`** | `prompt` *(string)*, `use_toon` *(bool, optional)* | Dispatches a prompt to Kimi K3 Fast on Fireworks AI. Setting `use_toon: true` requests TOON compact responses. |
-| **`toon_encode`** | `json_data` *(string)* | Converts JSON data into compact TOON (Token-Oriented Object Notation) format. |
-| **`toon_decode`** | `toon_data` *(string)* | Decodes a TOON formatted string back into clean JSON format. |
+| **`query_kimi`** | `prompt` *(string)*, `use_toon` *(bool, optional)*, `timeout_seconds` *(number, optional)* | Dispatches a prompt to Kimi K3 Fast on Fireworks AI. Setting `use_toon: true` requests TOON compact responses. |
+| **`encode_toon` / `toon_encode`** | `json_data` *(string)*, `strip_nulls` *(bool, optional)*, `key_map` *(dict, optional)* | Converts JSON data into compact TOON (Token-Oriented Object Notation) format with optional null stripping and key aliasing maps. |
+| **`decode_toon` / `toon_decode`** | `toon_data` *(string)*, `key_map` *(dict, optional)* | Decodes a TOON formatted string back into clean JSON format with optional reverse key mapping. |
 
 ---
 
