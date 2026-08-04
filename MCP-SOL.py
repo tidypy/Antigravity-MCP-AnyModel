@@ -20,7 +20,7 @@ DEFAULT_TIMEOUT_SEC = 25
 # ==========================================
 
 _PRIMITIVE_LIKE = re.compile(r'-?\d+(\.\d+)?([eE][+-]?\d+)?|true|false|null')
-_SPECIALS = set('",:\n\t\r[]{}')
+_SPECIALS = set('",:\n\t\r[]{} ')
 
 def _encode_str(s):
     """Encodes a string into TOON, adding quotes if it contains specials, whitespace, or primitive keywords."""
@@ -30,6 +30,30 @@ def _encode_str(s):
         esc = s.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n').replace('\t', '\\t').replace('\r', '\\r')
         return f'"{esc}"'
     return s
+
+def _split_fields(line):
+    """Splits a line by commas, respecting double quotes and backslash escaping."""
+    out, buf, in_q, esc = [], [], False, False
+    for ch in line:
+        if esc:
+            buf.append(ch)
+            esc = False
+        elif ch == "\\" and in_q:
+            buf.append(ch)
+            esc = True
+        elif ch == '"':
+            buf.append(ch)
+            in_q = not in_q
+        elif ch == "," and not in_q:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf))
+    return out
+
+def _is_flat_dict(d):
+    return isinstance(d, dict) and all(isinstance(v, (str, int, float, bool, type(None))) for v in d.values())
 
 def toon_encode(obj, indent=0):
     """
@@ -50,11 +74,11 @@ def toon_encode(obj, indent=0):
             return ""
         lines = []
         for k, v in obj.items():
-            encoded_key = _encode_str(k) if any(c in k for c in _SPECIALS) else k
-            if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            encoded_key = _encode_str(str(k))
+            if isinstance(v, list) and v and all(_is_flat_dict(x) for x in v):
                 cols = list(v[0].keys())
                 if all(list(x.keys()) == cols for x in v):
-                    col_str = ",".join(cols)
+                    col_str = ",".join(_encode_str(c) for c in cols)
                     lines.append(f"{prefix}{encoded_key}[{len(v)}]{{{col_str}}}:")
                     for row in v:
                         row_vals = [toon_encode(row.get(c)) for c in cols]
@@ -83,7 +107,7 @@ def toon_encode(obj, indent=0):
             return "[]"
         if all(isinstance(x, dict) for x in obj):
             cols = list(obj[0].keys())
-            lines = [f"items[{len(obj)}]{{{','.join(cols)}}}:"]
+            lines = [f"items[{len(obj)}]{{{','.join(_encode_str(c) for c in cols)}}}:"]
             for row in obj:
                 lines.append("  " + ",".join(toon_encode(row.get(c)) for c in cols))
             return "\n".join(lines)
@@ -137,33 +161,36 @@ def toon_decode(toon_str):
             
         current_obj = stack[-1][1]
         
-        tab_match = re.match(r"^([\w_]+)\[(\d+)\]\{([^}]+)\}:$", content)
-        prim_arr_match = re.match(r"^([\w_]+)\[(\d+)\]:\s*(.*)$", content)
-        kv_match = re.match(r"^([\w_]+):\s*(.*)$", content)
+        tab_match = re.match(r"^([\w_\"']+)\s*\[(\d+)\]\{([^}]+)\}:$", content)
+        prim_arr_match = re.match(r"^([\w_\"']+)\s*\[(\d+)\]:\s*(.*)$", content)
+        kv_match = re.match(r"^([\w_\"']+):\s*(.*)$", content)
         
         if tab_match:
-            key, count, cols_str = tab_match.groups()
+            key_raw, count, cols_str = tab_match.groups()
+            key = _parse_val(key_raw)
             count = int(count)
-            cols = [c.strip() for c in cols_str.split(",")]
+            cols = [_parse_val(c) for c in _split_fields(cols_str)]
             arr = []
             for _ in range(count):
                 i += 1
                 if i < len(lines):
                     row_line = lines[i].strip()
-                    parts = [p.strip() for p in row_line.split(",")]
+                    parts = [_parse_val(p) for p in _split_fields(row_line)]
                     row_dict = {}
                     for c_idx, col in enumerate(cols):
-                        row_dict[col] = _parse_val(parts[c_idx]) if c_idx < len(parts) else None
+                        row_dict[col] = parts[c_idx] if c_idx < len(parts) else None
                     arr.append(row_dict)
             if isinstance(current_obj, dict):
                 current_obj[key] = arr
         elif prim_arr_match:
-            key, count, inline_vals = prim_arr_match.groups()
-            vals = [_parse_val(v) for v in inline_vals.split(",")] if inline_vals else []
+            key_raw, count, inline_vals = prim_arr_match.groups()
+            key = _parse_val(key_raw)
+            vals = [_parse_val(v) for v in _split_fields(inline_vals)] if inline_vals else []
             if isinstance(current_obj, dict):
                 current_obj[key] = vals
         elif kv_match:
-            key, val_part = kv_match.groups()
+            key_raw, val_part = kv_match.groups()
+            key = _parse_val(key_raw)
             if not val_part:
                 sub_dict = {}
                 if isinstance(current_obj, dict):
@@ -327,7 +354,7 @@ def main():
                 },
                 "serverInfo": {
                     "name": "kimi-k3-fast-mcp-server",
-                    "version": "1.2.0"
+                    "version": "1.3.1"
                 }
             })
         elif method and method.startswith("notifications/"):
