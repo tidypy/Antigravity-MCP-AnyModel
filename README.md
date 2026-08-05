@@ -4,7 +4,7 @@
 [![Protocol](https://img.shields.io/badge/Protocol-MCP%20JSON--RPC%202.0-orange?style=flat-square)](https://modelcontextprotocol.io/)
 [![Orchestrator](https://img.shields.io/badge/Orchestrator-Google%20Antigravity-4285F4?style=flat-square)](https://deepmind.google/)
 
-A Model Context Protocol (MCP) bridge enabling **Google Antigravity** to seamlessly delegate code generation, heavy reasoning, and specialized tasks to third-party LLMs (such as **Kimi K3 Fast** hosted on Fireworks AI or other serverless BYOK providers) with built-in **TOON (Token-Oriented Object Notation)** compact format encoding and decoding.
+A Model Context Protocol (MCP) bridge enabling **Google Antigravity** to seamlessly delegate code generation, heavy reasoning, and specialized tasks to third-party LLMs (such as **Kimi-Code*** hosted on Fireworks AI or other serverless BYOK providers) with built-in **TOON (Token-Oriented Object Notation)** compact format encoding and decoding.
 
 ---
 
@@ -300,7 +300,7 @@ def main():
                 "tools": [
                     {
                         "name": "query_kimi",
-                        "description": "Send a prompt to the Kimi K3 Fast model on Fireworks AI for code generation and reasoning.",
+                        "description": "Send a prompt to the LLM model on Fireworks AI for code generation and reasoning.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -417,7 +417,7 @@ Add your server configuration to `C:\Users\Dev\.gemini\config\mcp_config.json` (
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| **`query_kimi`** | `prompt` *(string)*, `use_toon` *(bool, optional)*, `timeout_seconds` *(number, optional)* | Dispatches a prompt to Kimi K3 Fast on Fireworks AI. Setting `use_toon: true` requests TOON compact responses. |
+| **`query_kimi`** | `prompt` *(string)*, `use_toon` *(bool, optional)*, `timeout_seconds` *(number, optional)* | Dispatches a prompt to LLM-Model on Host (Fireworks AI in this case). Setting `use_toon: true` requests TOON compact responses. |
 | **`encode_toon` / `toon_encode`** | `json_data` *(string)*, `strip_nulls` *(bool, optional)*, `key_map` *(dict, optional)* | Converts JSON data into compact TOON (Token-Oriented Object Notation) format with optional null stripping and key aliasing maps. |
 | **`decode_toon` / `toon_decode`** | `toon_data` *(string)*, `key_map` *(dict, optional)* | Decodes a TOON formatted string back into clean JSON format with optional reverse key mapping. |
 
@@ -428,12 +428,12 @@ Add your server configuration to `C:\Users\Dev\.gemini\config\mcp_config.json` (
 Simply invoke the API in your Antigravity chat prompt:
 
 > **User Prompt:**  
-> *"Please invoke Kimi K3 to complete phase 1 of the implementation."*
+> *"Please invoke MPC-Tool-Antigrav to complete phase 1 of the implementation."*
 
 Or request TOON format optimization:
 
 > **User Prompt:**  
-> *"Please invoke Kimi K3 using TOON format to optimize token usage."*
+> *"Please invoke MPC-Tool-Antigrav using TOON format to optimize token usage."*
 
 Antigravity will automatically call the registered MCP tool (`call_mcp_tool` targeting `kimi-k3-fast` / `query_kimi`), receive the model's generated payload, extract the code/data, and integrate it into your codebase.
 
@@ -450,10 +450,10 @@ sequenceDiagram
     autonumber
     actor User
     participant AG as Antigravity Orchestrator
-    participant MCP as MCP Server (Kimi K3 Fast)
+    participant MCP as MCP Server (MPC-Tool-Antigrav Fast)
     participant FS as Local Filesystem / Git
 
-    User->>AG: "Invoke Kimi K3 for phase 1 implementation"
+    User->>AG: "Invoke MPC-Tool-Antigrav for phase 1 implementation"
     
     rect rgb(240, 248, 255)
     note right of AG: Scenario 1: Successful Delegation (db_migration.py)
@@ -478,14 +478,14 @@ sequenceDiagram
 
 ### Breakdown of Execution:
 
-1. **`db_migration.py` — Kimi K3 Fast Generation ✅**
-   * Antigravity dispatches `call_mcp_tool` targeting `kimi-k3-fast` (`query_kimi`).
-   * Kimi K3 Fast on Fireworks AI processes the prompt and returns 324 lines of clean Python code.
+1. **`db_migration.py` — MPC-Tool-Antigrav Fast Generation ✅**
+   * Antigravity dispatches `call_mcp_tool` targeting `LLM Model of Choice (kimi-k3-fast)` (`query_kimi`).
+   * LLM-model on hos (Fireworks AI) processes the prompt and returns 324 lines of clean Python code.
    * Raw payload is recorded in step logs (`.system_generated/steps/.../output.txt`).
    * Antigravity parses the payload, extracts code blocks, and writes `bin/Code/Databases/db_migration.py`.
 
 2. **`game_validator.py` — MCP Timeout & Orchestrator Fallback ⚙️**
-   * Antigravity dispatches queries to Kimi K3 Fast for `game_validator.py`.
+   * Antigravity dispatches queries to MPC-Tool-Antigrav for `game_validator.py`.
    * Fireworks AI times out after 60 seconds (`Unexpected error: The read operation timed out`).
    * **Orchestrator Resolution**: Rather than stalling execution, Antigravity steps in directly to write `game_validator.py` using Phase 2 tiering rules and schema definitions.
    * Antigravity authors `test_phase2_validation.py`, runs the test suite (8/8 unit tests passed in 0.109s), commits, and pushes code to GitHub.
@@ -510,7 +510,7 @@ sequenceDiagram
 
 #### Option A: Chunked Generation (Recommended for External LLM)
 Ask the LLM to write small, tightly-scoped functions:
-> *"Please invoke Kimi K3 to write only the `validate_game_data()` function."*  
+> *"Please invoke MPC-Tool-Antigrav to write only the `validate_game_data()` function."*  
 This ensures each individual stream completes in under 15 seconds.
 
 #### Option B: Fallback to Gemini ("Gemini step in")
@@ -527,8 +527,8 @@ Request outputs in TOON format to reduce token length by 30%–60%, lowering res
 
 To ensure full transparency and predictable behavior, Antigravity enforces strict delegation rules:
 
-1. **Strict Kimi K3 Delegation (No Automatic Unsanctioned Fallbacks):**
-   Antigravity will **NEVER** silently generate code or override Kimi K3 unless explicitly configured or instructed to do so.
+1. **Strict MPC-Tool-Antigrav Delegation (No Automatic Unsanctioned Fallbacks):**
+   Antigravity will **NEVER** silently generate code or override MPC-Tool-Antigrav unless explicitly configured or instructed to do so.
 2. **Timeout / Error Reporting & Retry:**
    If `query_kimi` times out or fails (due to Fireworks AI latency or network issues), Antigravity will immediately halt, explain the exact error details, and prompt you for instructions or retry approval.
 3. **Gemini Step-In Requires Explicit Approval + High Model:**
